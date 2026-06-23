@@ -5,6 +5,7 @@ export interface StickmanJoint {
   id: string;
   x: number;
   y: number;
+  z: number;
 }
 
 export interface StickmanBone {
@@ -12,188 +13,221 @@ export interface StickmanBone {
   b: string;
 }
 
+export type ViewType = 'front' | 'side';
+
 export interface StickmanOptions {
-  x?: number; 
-  y?: number;
+  offsetX: number;
+  offsetY: number;
   scale?: number;
+  label?: string;
   nodeRadius?: number;
   nodeColor?: number;
+  clubNodeColor?: number;
   boneColor?: number;
-  showClub?: boolean;
-  label?: string;
 }
 
-interface Node {
-  x: number;
-  y: number;
+interface Node3D { 
+  x: number; 
+  y: number; 
+  z: number; 
 }
 
-interface BoneInternal extends StickmanBone {
-  length: number;
+interface BoneInternal extends StickmanBone { 
+  length: number; 
 }
 
-const RELAX_ITERATIONS = 12;
+const RELAX_ITERATIONS = 16;
 
-export class Stickman {
-  private scene: Scene;
-  private nodes: Record<string, Node> = {};
-  private bones: BoneInternal[] = [];
-  private circles: Record<string, Phaser.GameObjects.Arc> = {};
+export class StickmanView {
+  readonly type: ViewType;
+  readonly offsetX: number;
+  readonly offsetY: number;
+  readonly scale: number;
+
+  private owner: Stickman;
   private graphics: Phaser.GameObjects.Graphics;
-  private nodeRadius: number;
+  private circles = new Map<string, Phaser.GameObjects.Arc>();
   private boneColor: number;
-  private showClub: boolean;
+  private nodeRadius: number;
 
   constructor(
-    scene: Scene,
-    joints: StickmanJoint[],
-    bones: StickmanBone[],
-    options: StickmanOptions = {}
+    scene: Scene, 
+    owner: Stickman, 
+    type: ViewType, 
+    options: StickmanOptions
   ) {
-    this.scene = scene;
-
-    const offsetX = options.x ?? 0;
-    const offsetY = options.y ?? 0;
-    const scale = options.scale ?? 1;
-    this.nodeRadius = (options.nodeRadius ?? 14) * scale;
+    this.owner = owner;
+    this.type = type;
+    this.offsetX = options.offsetX;
+    this.offsetY = options.offsetY;
+    this.scale = options.scale ?? 1;
+    this.nodeRadius = (options.nodeRadius ?? 14) * this.scale;
     this.boneColor = options.boneColor ?? 0x1a1a1a;
+
     const nodeColor = options.nodeColor ?? 0xff4d3d;
-    this.showClub = options.showClub ?? true;
-
-    joints.forEach((j) => {
-      this.nodes[j.id] = { x: offsetX + j.x * scale, y: offsetY + j.y * scale };
-    });
-
-    this.bones = bones.map((bone) => {
-      const a = this.getNode(bone.a);
-      const b = this.getNode(bone.b);
-      return { ...bone, length: Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y) };
-    });
+    const clubColor = options.clubNodeColor ?? 0x777777;
 
     this.graphics = scene.add.graphics();
 
     if (options.label) {
       scene.add
-        .text(offsetX, offsetY - 30 * scale, options.label, {
+        .text(options.offsetX, options.offsetY - 30, options.label, {
           fontFamily: 'Arial',
           fontSize: 20,
-          color: '#ffffff',
+          color: '#999999',
         })
         .setOrigin(0, 0.5);
     }
 
-    joints.forEach((j) => this.createJointCircle(j.id, nodeColor));
+    for (const id of owner.jointIds) {
+      const isClub = id === 'clubHead';
+      const radius = isClub ? this.nodeRadius * 1.5 : this.nodeRadius;
+      const color = isClub ? clubColor : nodeColor;
+
+      const pos = this.project(owner.getNode(id));
+      const circle = scene.add.circle(pos.x, pos.y, radius, color);
+      circle.setStrokeStyle(2, 0x000000, 0.35);
+      circle.setInteractive({ useHandCursor: true });
+      scene.input.setDraggable(circle);
+
+      circle.on('dragstart', () => circle.setScale(1.12));
+      circle.on('dragend', () => circle.setScale(1));
+      circle.on('drag', (_ptr: Phaser.Input.Pointer, sx: number, sy: number) => {
+        owner.moveAndRelax(id, this, sx, sy);
+      });
+
+      this.circles.set(id, circle);
+    }
 
     this.redraw();
   }
 
-  private getNode(id: string): Node {
-    const node = this.nodes[id];
-    if (!node) throw new Error(`Stickman: unknown joint id "${id}"`);
-    return node;
+  project(n: Node3D): { x: number; y: number } {
+    return {
+      x: this.offsetX + (this.type === 'front' ? n.x : n.z) * this.scale,
+      y: this.offsetY + n.y * this.scale,
+    };
   }
 
-  private hasNode(id: string): boolean {
-    return id in this.nodes;
+  unproject(screenX: number, screenY: number): Partial<Node3D> {
+    const axis = (screenX - this.offsetX) / this.scale;
+    const y = (screenY - this.offsetY) / this.scale;
+    return this.type === 'front' ? { x: axis, y } : { z: axis, y };
   }
 
-  private createJointCircle(id: string, color: number) {
-    const node = this.getNode(id);
-    const circle = this.scene.add.circle(node.x, node.y, this.nodeRadius, color);
-    circle.setStrokeStyle(2, 0x000000, 0.55);
-    circle.setInteractive({ useHandCursor: true });
-    this.scene.input.setDraggable(circle);
+  redraw() {
+    const g = this.graphics;
+    g.clear();
 
-    circle.on('dragstart', () => circle.setScale(1.15));
-    circle.on('dragend', () => circle.setScale(1));
+    for (const bone of this.owner.getBones()) {
+      const isShaft = bone.a === 'rightWrist' && bone.b === 'clubHead';
+      g.lineStyle(isShaft ? 3 : 5, isShaft ? 0x888888 : this.boneColor, 1);
+      const a = this.project(this.owner.getNode(bone.a));
+      const b = this.project(this.owner.getNode(bone.b));
+      g.lineBetween(a.x, a.y, b.x, b.y);
+    }
 
-    circle.on('drag', (_pointer: Phaser.Input.Pointer, dragX: number, dragY: number) => {
-      const node = this.getNode(id);
-      node.x = dragX;
-      node.y = dragY;
-      this.relax(id);
-      this.syncCircles();
-      this.redraw();
+    if (this.owner.hasNode('neck') && this.owner.hasNode('hip')) {
+      const neck = this.project(this.owner.getNode('neck'));
+      const hip = this.project(this.owner.getNode('hip'));
+      const dx = neck.x - hip.x;
+      const dy = neck.y - hip.y;
+      const l = Math.hypot(dx, dy) || 1;
+      const r = this.nodeRadius * 1.9;
+      const hx = neck.x + (dx / l) * (r + this.nodeRadius * 0.4);
+      const hy = neck.y + (dy / l) * (r + this.nodeRadius * 0.4);
+      g.lineStyle(3, this.boneColor, 1);
+      g.strokeCircle(hx, hy, r);
+    }
+
+    for (const [id, circle] of this.circles) {
+      const pos = this.project(this.owner.getNode(id));
+      circle.setPosition(pos.x, pos.y);
+    }
+  }
+}
+
+export class Stickman {
+  readonly jointIds: readonly string[];
+
+  private nodes = new Map<string, Node3D>();
+  private bones: BoneInternal[];
+  private views: StickmanView[] = [];
+
+  constructor(joints: StickmanJoint[], boneDefs: StickmanBone[]) {
+    joints.forEach((j) => this.nodes.set(j.id, { x: j.x, y: j.y, z: j.z }));
+    this.jointIds = joints.map((j) => j.id);
+
+    this.bones = boneDefs.map((def) => {
+      const a = this.getNode(def.a);
+      const b = this.getNode(def.b);
+      const length = Math.sqrt(
+        (b.x - a.x) ** 2 + (b.y - a.y) ** 2 + (b.z - a.z) ** 2
+      );
+      return { ...def, length };
     });
-
-    this.circles[id] = circle;
   }
 
-  private relax(pinnedId: string) {
+  getNode(id: string): Node3D {
+    const n = this.nodes.get(id);
+    if (!n) throw new Error(`Stickman: unknown joint "${id}"`);
+    return n;
+  }
+
+  hasNode(id: string): boolean {
+    return this.nodes.has(id);
+  }
+
+  getBones(): readonly BoneInternal[] {
+    return this.bones;
+  }
+
+  addView(scene: Scene, type: ViewType, opts: StickmanOptions): StickmanView {
+    const view = new StickmanView(scene, this, type, opts);
+    this.views.push(view);
+    return view;
+  }
+
+  moveAndRelax(
+    id: string,
+    fromView: StickmanView,
+    screenX: number,
+    screenY: number
+  ): void {
+    const delta = fromView.unproject(screenX, screenY);
+    const node = this.getNode(id);
+    if (delta.x !== undefined) node.x = delta.x;
+    if (delta.y !== undefined) node.y = delta.y;
+    if (delta.z !== undefined) node.z = delta.z;
+
+    this.relax(id);
+    for (const view of this.views) view.redraw();
+  }
+
+  private relax(pinnedId: string): void {
     for (let i = 0; i < RELAX_ITERATIONS; i++) {
       for (const bone of this.bones) {
         const a = this.getNode(bone.a);
         const b = this.getNode(bone.b);
-
         const aPinned = bone.a === pinnedId;
         const bPinned = bone.b === pinnedId;
         if (aPinned && bPinned) continue;
 
         const dx = b.x - a.x;
         const dy = b.y - a.y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+        const dz = b.z - a.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 0.0001;
         const diff = (dist - bone.length) / dist;
+        const mA = aPinned ? 0 : bPinned ? 1 : 0.5;
+        const mB = bPinned ? 0 : aPinned ? 1 : 0.5;
 
-        const moveA = aPinned ? 0 : bPinned ? 1 : 0.5;
-        const moveB = bPinned ? 0 : aPinned ? 1 : 0.5;
-
-        a.x += dx * diff * moveA;
-        a.y += dy * diff * moveA;
-        b.x -= dx * diff * moveB;
-        b.y -= dy * diff * moveB;
+        a.x += dx * diff * mA;
+        a.y += dy * diff * mA;
+        a.z += dz * diff * mA;
+        b.x -= dx * diff * mB;
+        b.y -= dy * diff * mB;
+        b.z -= dz * diff * mB;
       }
-    }
-  }
-
-  private syncCircles() {
-    for (const id in this.circles) {
-      const node = this.getNode(id);
-      const circle = this.circles[id];
-      if (circle) circle.setPosition(node.x, node.y);
-    }
-  }
-
-  private redraw() {
-    const g = this.graphics;
-    g.clear();
-
-    g.lineStyle(5, this.boneColor, 1);
-    this.bones.forEach((bone) => {
-      const a = this.getNode(bone.a);
-      const b = this.getNode(bone.b);
-      g.lineBetween(a.x, a.y, b.x, b.y);
-    });
-
-    if (this.hasNode('neck') && this.hasNode('hip')) {
-      const neck = this.getNode('neck');
-      const hip = this.getNode('hip');
-      let dx = neck.x - hip.x;
-      let dy = neck.y - hip.y;
-      const len = Math.sqrt(dx * dx + dy * dy) || 1;
-      dx /= len;
-      dy /= len;
-      const headRadius = this.nodeRadius * 1.9;
-      const headX = neck.x + dx * (headRadius + this.nodeRadius * 0.4);
-      const headY = neck.y + dy * (headRadius + this.nodeRadius * 0.4);
-      g.lineStyle(3, this.boneColor, 1);
-      g.strokeCircle(headX, headY, headRadius);
-    }
-
-    if (this.showClub && this.hasNode('rightElbow') && this.hasNode('rightWrist')) {
-      const elbow = this.getNode('rightElbow');
-      const wrist = this.getNode('rightWrist');
-      let dx = wrist.x - elbow.x;
-      let dy = wrist.y - elbow.y;
-      const len = Math.sqrt(dx * dx + dy * dy) || 1;
-      dx /= len;
-      dy /= len;
-      const clubLength = this.nodeRadius * 10;
-      const headX = wrist.x + dx * clubLength;
-      const headY = wrist.y + dy * clubLength;
-      g.lineStyle(4, 0x8a8a8a, 1);
-      g.lineBetween(wrist.x, wrist.y, headX, headY);
-      g.fillStyle(0x8a8a8a, 1);
-      g.fillEllipse(headX, headY, this.nodeRadius * 1.8, this.nodeRadius * 1.1);
     }
   }
 }
