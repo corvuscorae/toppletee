@@ -49,6 +49,7 @@ export class StickmanView {
   private circles = new Map<string, Phaser.GameObjects.Arc>();
   private boneColor: number;
   private nodeRadius: number;
+  private labelText: Phaser.GameObjects.Text | null = null;
 
   constructor(
     scene: Scene, 
@@ -70,7 +71,7 @@ export class StickmanView {
     this.graphics = scene.add.graphics();
 
     if (options.label) {
-      scene.add
+      this.labelText = scene.add
         .text(options.offsetX, options.offsetY - 30, options.label, {
           fontFamily: 'Arial',
           fontSize: 20,
@@ -113,6 +114,19 @@ export class StickmanView {
     const axis = (screenX - this.offsetX) / this.scale;
     const y = (screenY - this.offsetY) / this.scale;
     return this.type === 'front' ? { x: axis, y } : { z: axis, y };
+  }
+
+  setVisible(visible: boolean): void {
+    this.graphics.setVisible(visible);
+    if (this.labelText) this.labelText.setVisible(visible);
+    for (const [, circle] of this.circles) {
+      circle.setVisible(visible);
+      if (visible) {
+        circle.setInteractive({ useHandCursor: true });
+      } else {
+        circle.disableInteractive();
+      }
+    }
   }
 
   redraw() {
